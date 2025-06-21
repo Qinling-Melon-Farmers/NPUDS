@@ -1,6 +1,6 @@
 import pandas as pd
 
-def load_data():
+def load_data(data_path):
     df = pd.read_csv('./ETTdata/ETTh1.csv')
     df['date'] = pd.to_datetime(df['date'])
     df.set_index('date', inplace=True)
