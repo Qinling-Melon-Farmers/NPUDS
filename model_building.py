@@ -6,23 +6,14 @@ from torch.utils.data import DataLoader, TensorDataset
 
 
 class MultiTaskLSTMModel(nn.Module):
-    def __init__(self, input_size=1, hidden_size=64, output_size=1,
+    def __init__(self, input_size=8, hidden_size=64, output_size=1,  # 修改input_size为8
                  predict_steps=1, reconstruction_mode='full'):
-        """
-        多任务时间序列模型
-
-        参数:
-        input_size: 输入特征维度
-        hidden_size: LSTM隐藏层大小
-        output_size: 输出维度(预测任务)
-        predict_steps: 预测步数 (1:普通预测, >1:长时延预测)
-        reconstruction_mode: 重构模式 ('full', 'partial')
-        """
         super(MultiTaskLSTMModel, self).__init__()
         self.predict_steps = predict_steps
         self.reconstruction_mode = reconstruction_mode
+        self.input_size = input_size  # 保存输入尺寸
 
-        # LSTM编码器
+        # LSTM编码器 - 输入尺寸改为8
         self.encoder = nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
@@ -36,44 +27,33 @@ class MultiTaskLSTMModel(nn.Module):
             nn.Linear(hidden_size, output_size * predict_steps),
         )
 
-        # 重构任务解码器
+        # 重构任务解码器 - 输出尺寸改为8
         self.recon_decoder = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
-            nn.Linear(hidden_size, input_size),
-        )# 输出与输入相同维度
+            nn.Linear(hidden_size, input_size),  # 输出所有特征
+        )
 
     def forward(self, x):
-        """
-        前向传播
-
-        参数:
-        x: 输入序列 [batch_size, seq_len, input_size]
-
-        返回:
-        prediction: 预测结果 [batch_size, predict_steps]
-        reconstruction: 重构结果 [batch_size, seq_len] 或 [batch_size, seq_len//2]
-        """
         # 编码器
         lstm_out, (hidden, cell) = self.encoder(x)
 
-        # 预测任务
+        # 预测任务 - 只预测OT值
         prediction = self.predict_decoder(hidden.squeeze(0))
         prediction = prediction.view(-1, self.predict_steps)
 
-        # 重构任务
+        # 重构任务 - 重构所有特征
         if self.reconstruction_mode == 'full':
-            # 重构整个序列
-            reconstruction = self.recon_decoder(lstm_out).squeeze(-1)
+            reconstruction = self.recon_decoder(lstm_out)
         elif self.reconstruction_mode == 'partial':
-            # 只重构序列的后半部分
             seq_len = lstm_out.size(1)
             half_len = seq_len // 2
-            # 只取后半部分时间步的重构
-            recon_part = self.recon_decoder(lstm_out[:, half_len:, :]).squeeze(-1)
+            recon_part = self.recon_decoder(lstm_out[:, half_len:, :])
 
-            # 创建完整长度的重构输出，前半部分设为0（实际中不计算损失）
-            full_recon = torch.zeros_like(x.squeeze(-1))
+            full_recon = torch.zeros(
+                x.size(0), seq_len, self.input_size,
+                device=x.device, dtype=x.dtype
+            )
             full_recon[:, half_len:] = recon_part
             reconstruction = full_recon
         else:
@@ -82,16 +62,16 @@ class MultiTaskLSTMModel(nn.Module):
         return prediction, reconstruction
 
 
-def build_multi_task_model(window_size, input_size=1, predict_steps=1,
-                           reconstruction_mode='full', device='device'):
+def build_multi_task_model(window_size, input_size=8, predict_steps=1,  # 默认输入尺寸改为8
+                           reconstruction_mode='full', device='cpu'):
     """
     构建多任务模型
 
     参数:
     window_size: 输入窗口大小
-    input_size: 输入特征维度
-    predict_steps: 预测步数 (1:普通预测, >1:长时延预测)
-    reconstruction_mode: 重构模式 ('full', 'partial')
+    input_size: 输入特征维度 (现在为8)
+    predict_steps: 预测步数
+    reconstruction_mode: 重构模式
     device: 计算设备
     """
     model = MultiTaskLSTMModel(
@@ -102,25 +82,8 @@ def build_multi_task_model(window_size, input_size=1, predict_steps=1,
     return model.to(device)
 
 
-def train_multi_task_model(model, X_train, y_train, epochs=50, batch_size=32, device='device'):
-    """
-    训练多任务模型
-
-    参数:
-    model: 模型实例
-    X_train: 训练输入 [samples, window_size]
-    y_train: 训练标签 (预测目标) [samples]
-    epochs: 训练轮数
-    batch_size: 批大小
-    device: 计算设备
-
-    返回:
-    训练好的模型
-    """
-    # 确保数据是3D: [samples, sequence_length, features]
-    if len(X_train.shape) == 2:
-        X_train = X_train.reshape(X_train.shape[0], X_train.shape[1], 1)
-
+def train_multi_task_model(model, X_train, y_train, epochs=50, batch_size=32, device='cpu'):
+    # 数据已经是3D: [samples, sequence_length, features]
     # 转换为张量
     X_tensor = torch.tensor(X_train, dtype=torch.float32).to(device)
     y_tensor = torch.tensor(y_train, dtype=torch.float32).to(device)
@@ -144,32 +107,30 @@ def train_multi_task_model(model, X_train, y_train, epochs=50, batch_size=32, de
         all_true = []
 
         for X_batch, y_batch in loader:
-            if len(X_batch.shape) == 2:
-                X_batch = X_batch.unsqueeze(-1)  # [batch, window] -> [batch, window, 1]
-
             optimizer.zero_grad()
 
             # 前向传播
             prediction, reconstruction = model(X_batch)
 
-            # 计算预测任务损失
-            pred_loss = criterion_pred(prediction.squeeze(), y_batch)
+            # 计算预测任务损失 - y_batch形状为 [batch_size, predict_steps]
+            pred_loss = criterion_pred(prediction, y_batch)  # 注意：prediction形状应为 [batch_size, predict_steps]
 
-            # 计算重构任务损失
+            # 计算重构任务损失 - 现在重构所有特征
             if model.reconstruction_mode == 'full':
-                # 整个序列的重构损失
-                recon_loss = criterion_recon(reconstruction, X_batch.squeeze(-1))
+                recon_loss = criterion_recon(reconstruction, X_batch)
             else:
-                # 只计算后半部分的重构损失
                 seq_len = X_batch.size(1)
                 half_len = seq_len // 2
                 recon_loss = criterion_recon(
                     reconstruction[:, half_len:],
-                    X_batch[:, half_len:, 0]
+                    X_batch[:, half_len:]
                 )
-
-            # 组合损失
-            loss = pred_loss + 0.5 * recon_loss  # 加权组合
+            # 组合损失 - 动态调整权重
+            # 前期侧重重构，后期侧重预测
+            if epoch < epochs // 2:
+                loss = 0.4 * pred_loss + 0.6 * recon_loss
+            else:
+                loss = 0.7 * pred_loss + 0.3 * recon_loss
 
             # 反向传播
             loss.backward()
@@ -181,8 +142,8 @@ def train_multi_task_model(model, X_train, y_train, epochs=50, batch_size=32, de
             total_recon_loss += recon_loss.item()
 
             # 收集预测结果用于指标计算
-            all_preds.extend(prediction.squeeze().cpu().detach().numpy())
-            all_true.extend(y_batch.cpu().detach().numpy())
+            all_preds.extend(prediction[:, 0].cpu().detach().numpy())  # 只取第一步预测
+            all_true.extend(y_batch[:, 0].cpu().detach().numpy())
 
         # 计算指标
         mae = mean_absolute_error(all_true, all_preds)
@@ -202,18 +163,14 @@ def predict_next_step(model, X, device='device'):
 
     参数:
     model: 训练好的模型
-    X: 输入序列 [samples, window_size]
+    X: 输入序列 [samples, window_size, features]
     device: 计算设备
 
     返回:
-    预测结果 [samples] (只预测下一步)
+    预测结果 [samples] (只预测下一步的OT值)
     """
     model.eval()
     with torch.no_grad():
-        # 确保输入是3D
-        if len(X.shape) == 2:
-            X = X.reshape(X.shape[0], X.shape[1], 1)
-
         X_tensor = torch.tensor(X, dtype=torch.float32).to(device)
         prediction, _ = model(X_tensor)
         # 只取每个样本的第一步预测
@@ -227,18 +184,18 @@ def predict_long_term(model, initial_seq, steps=3, device='device'):
 
     参数:
     model: 训练好的模型
-    initial_seq: 初始序列 [1, window_size]
+    initial_seq: 初始序列 [1, window_size, features]
     steps: 预测步数
     device: 计算设备
 
     返回:
-    预测序列 [steps]
+    预测序列 [steps] (OT值)
     """
     model.eval()
     with torch.no_grad():
         # 确保初始序列是3D
         if len(initial_seq.shape) == 2:
-            initial_seq = initial_seq.reshape(1, initial_seq.shape[1], 1)
+            initial_seq = initial_seq.reshape(1, initial_seq.shape[1], -1)
 
         current_seq = torch.tensor(initial_seq, dtype=torch.float32).to(device)
         predictions = []
@@ -246,14 +203,20 @@ def predict_long_term(model, initial_seq, steps=3, device='device'):
         for _ in range(steps):
             # 预测下一个点
             prediction, _ = model(current_seq)
-            next_val = prediction.squeeze().cpu().numpy()[0]
-            predictions.append(next_val)
+            next_val = prediction[0, 0].item()  # 取第一个样本的第一步预测
+
+            # 创建新点 - 只有OT值，其他特征未知
+            # 这里简单假设其他特征不变，但实际应用中可能需要更好的处理
+            new_point = np.zeros((1, 1, model.input_size))
+            new_point[0, 0, -1] = next_val  # 假设OT是最后一个特征
 
             # 更新序列: 移除第一个点，添加新预测
             current_seq = torch.cat([
                 current_seq[:, 1:, :],
-                torch.tensor([[[next_val]]], dtype=torch.float32).to(device)
+                torch.tensor(new_point, dtype=torch.float32).to(device)
             ], dim=1)
+
+            predictions.append(next_val)
 
     return np.array(predictions)
 

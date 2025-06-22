@@ -6,87 +6,131 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 class PersistenceModel:
     """
-    持久性模型 (上一步值预测下一步)
+    持久性模型 (上一步值预测下一步) - 支持多特征输入
+
+    修改说明:
+    1. 添加了target_col参数指定目标列
+    2. 添加了target_idx参数存储目标列索引
+    3. 所有预测方法现在专门针对目标列(OT)进行预测
     """
 
-    def __init__(self, predict_steps=1):
+    def __init__(self, predict_steps=1, target_col='OT'):
         self.predict_steps = predict_steps
+        self.target_col = target_col
+        self.target_idx = None  # 将在fit方法中确定
 
     def fit(self, X, y=None):
-        # 朴素模型不需要训练
+        """
+        确定目标列的索引
+
+        参数:
+        X: 输入数据 (DataFrame或特征矩阵)
+        """
+        if isinstance(X, pd.DataFrame):
+            # 从DataFrame确定目标列索引
+            self.target_idx = X.columns.get_loc(self.target_col)
+        elif X.ndim == 2:
+            # 对于二维数组，假设最后一列是目标列
+            self.target_idx = -1
+        else:
+            raise ValueError("无法确定目标列索引，请提供DataFrame或二维数组")
         return self
 
     def predict_single_step(self, X):
         """
-        单步预测: 使用序列的最后一步作为预测值
+        单步预测: 使用序列的最后一步的目标特征值作为预测值
 
         参数:
-        X: 输入序列 [n_samples, window_size]
+        X: 输入序列 [n_samples, window_size, n_features] 或 [n_samples, window_size]
 
         返回:
         预测值 [n_samples]
         """
-        # 取每个序列的最后一个值
-        return X[:, -1]
+        if X.ndim == 3:
+            # 取每个序列最后一个时间步的目标特征值
+            return X[:, -1, self.target_idx]
+        elif X.ndim == 2:
+            # 对于二维输入，直接取最后一个值
+            return X[:, -1]
+        else:
+            raise ValueError(f"不支持的输入维度: {X.ndim}")
 
     def predict_multi_step(self, X):
         """
-        多步预测: 使用序列的最后一步作为所有预测步的值
+        多步预测: 使用序列的最后一步的目标特征值作为所有预测步的值
 
         参数:
-        X: 输入序列 [n_samples, window_size]
+        X: 输入序列 [n_samples, window_size, n_features] 或 [n_samples, window_size]
 
         返回:
         预测值 [n_samples, predict_steps]
         """
-        # 取每个序列的最后一个值，并复制到所有预测步
-        last_vals = X[:, -1]
+        # 获取单步预测值
+        last_vals = self.predict_single_step(X)
         return np.tile(last_vals[:, np.newaxis], (1, self.predict_steps))
 
     def predict_long_term(self, initial_seq, steps):
         """
-        长时延预测: 使用初始序列的最后值作为所有预测步的值
+        长时延预测: 使用初始序列的最后时间步的目标特征值作为所有预测步的值
 
         参数:
-        initial_seq: 初始序列 [1, window_size]
+        initial_seq: 初始序列 [1, window_size, n_features] 或 [1, window_size]
         steps: 预测步数
 
         返回:
         预测序列 [steps]
         """
-        last_val = initial_seq[0, -1]
+        if initial_seq.ndim == 3:
+            last_val = initial_seq[0, -1, self.target_idx]
+        elif initial_seq.ndim == 2:
+            last_val = initial_seq[0, -1]
+        else:
+            raise ValueError(f"不支持的输入维度: {initial_seq.ndim}")
+
         return np.full(steps, last_val)
 
 
-def baseline_experiment(train_data, test_data, window_size, predict_steps=3):
+def baseline_experiment(train_data, test_data, window_size, predict_steps=3, target_col='OT'):
     """
-    基线模型实验
+    基线模型实验 - 支持多特征输入
 
     参数:
-    train_data: 训练数据 (1D数组)
-    test_data: 测试数据 (1D数组)
+    train_data: 训练数据 (DataFrame或数组)
+    test_data: 测试数据 (DataFrame或数组)
     window_size: 窗口大小
     predict_steps: 预测步数
+    target_col: 目标列名 (仅当输入为DataFrame时使用)
 
     返回:
     包含评估指标和可视化结果的字典
     """
 
-    # 创建滑动窗口
-    def create_windows(data, window_size, predict_steps=1):
+    # 创建滑动窗口 - 支持多特征输入
+    def create_windows(data, window_size, predict_steps=1, target_col=None):
         X, y = [], []
-        for i in range(len(data) - window_size - predict_steps + 1):
-            X.append(data[i:i + window_size])
-            y.append(data[i + window_size:i + window_size + predict_steps])
+
+        if isinstance(data, pd.DataFrame):
+            # DataFrame处理
+            target_values = data[target_col].values
+            feature_values = data.values
+
+            for i in range(len(data) - window_size - predict_steps + 1):
+                X.append(feature_values[i:i + window_size])
+                y.append(target_values[i + window_size:i + window_size + predict_steps])
+        else:
+            # 数组处理 - 假设最后一列是目标列
+            for i in range(len(data) - window_size - predict_steps + 1):
+                X.append(data[i:i + window_size, :])
+                y.append(data[i + window_size:i + window_size + predict_steps, -1])
+
         return np.array(X), np.array(y)
 
     # 准备数据
-    _, _ = create_windows(train_data, window_size, predict_steps)  # 训练数据只用于创建窗口
-    X_test, y_test = create_windows(test_data, window_size, predict_steps)
+    X_test, y_test = create_windows(test_data, window_size, predict_steps, target_col)
 
     # 初始化模型
-    model = PersistenceModel(predict_steps=predict_steps)
-    model.fit(None)  # 不需要训练
+    model = PersistenceModel(predict_steps=predict_steps, target_col=target_col)
+    model.fit(train_data)  # 需要确定目标列索引
 
     # 单步预测
     y_pred_next = model.predict_single_step(X_test)

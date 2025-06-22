@@ -1,6 +1,9 @@
 # 在文件顶部设置后端
 import matplotlib
 
+from feature_engineering import create_sliding_windows
+from persistence_baseline import PersistenceModel
+
 matplotlib.use('Agg')  # 使用非交互式后端
 import matplotlib.pyplot as plt
 
@@ -16,7 +19,7 @@ except:
 
 import torch
 import numpy as np
-from data_preprocessing import load_data, handle_missing_values, split_sequential
+from data_preprocessing import load_data, handle_missing_values, split_sequential, normalize_data
 from model_building import (
     build_multi_task_model,
     train_multi_task_model,
@@ -27,36 +30,16 @@ from model_building import (
 from config import CONFIG
 
 
-def create_sliding_windows(data, window_size, predict_steps=1):
-    """
-    创建滑动窗口数据集，支持多步预测
-
-    参数:
-    data: 输入数据 (1D数组)
-    window_size: 窗口大小
-    predict_steps: 预测步数
-
-    返回:
-    X: 输入序列 [n_samples, window_size]
-    y: 目标值 [n_samples, predict_steps]
-    """
-    X, y = [], []
-    for i in range(len(data) - window_size - predict_steps + 1):
-        X.append(data[i:i + window_size])
-        # 预测目标: 未来 predict_steps 个点
-        y.append(data[i + window_size:i + window_size + predict_steps])
-    return np.array(X), np.array(y)
-
-
 def visualize_results(X_test, y_test, y_pred_next, long_term_preds, full_recon, partial_recon, window_size):
     """
-    更新后的可视化函数
+    更新后的可视化函数 - 支持多通道重构
     """
     plt.figure(figsize=(18, 15))
 
     # 样本索引
     sample_idx = 0
     predict_steps = len(long_term_preds[0])
+    n_features = X_test.shape[2]  # 特征数量
 
     # 1. 普通预测 (X_{n+1})
     plt.subplot(3, 2, 1)
@@ -76,27 +59,38 @@ def visualize_results(X_test, y_test, y_pred_next, long_term_preds, full_recon, 
     plt.ylabel("油温")
     plt.legend()
 
-    # 3. 重构整个窗口 (X_n)
+    # 3. 重构整个窗口 (OT特征)
     plt.subplot(3, 2, 3)
-    plt.plot(X_test[sample_idx], label='原始序列')
-    plt.plot(full_recon[sample_idx], label='重构序列')
-    plt.title("整个窗口重构")
+    # 只显示OT特征的重构
+    ot_idx = -1  # 假设OT是最后一个特征
+    plt.plot(X_test[sample_idx, :, ot_idx], label='原始OT序列')
+    plt.plot(full_recon[sample_idx, :, ot_idx], label='重构OT序列')
+    plt.title("整个窗口重构 (OT特征)")
     plt.xlabel("时间步")
     plt.ylabel("油温")
     plt.legend()
 
-    # 4. 重构部分序列 (X_{n/2} 到 X_n)
+    # 4. 重构部分序列 (OT特征)
     plt.subplot(3, 2, 4)
     half_len = window_size // 2
-    plt.plot(range(window_size), X_test[sample_idx], label='原始序列')
-    plt.plot(range(half_len, window_size), partial_recon[sample_idx], label='重构部分')
-    plt.title("部分序列重构")
+    plt.plot(range(window_size), X_test[sample_idx, :, ot_idx], label='原始OT序列')
+    plt.plot(range(half_len, window_size), partial_recon[sample_idx, :, ot_idx], label='重构部分OT序列')
+    plt.title("部分序列重构 (OT特征)")
     plt.xlabel("时间步")
     plt.ylabel("油温")
     plt.legend()
 
-    # 5. 预测对比 (前100个样本的下一步预测)
-    plt.subplot(3, 1, 3)
+    # 5. 其他特征重构示例 (HUFL)
+    plt.subplot(3, 2, 5)
+    plt.plot(X_test[sample_idx, :, 1], label='原始HUFL序列')
+    plt.plot(full_recon[sample_idx, :, 1], label='重构HUFL序列')
+    plt.title("整个窗口重构 (HUFL特征)")
+    plt.xlabel("时间步")
+    plt.ylabel("HUFL值")
+    plt.legend()
+
+    # 6. 预测对比 (前100个样本的下一步预测)
+    plt.subplot(3, 2, 6)
     plt.plot(y_test[:100, 0], label='真实值')
     plt.plot(y_pred_next[:100], label='预测值')
     plt.title("前100个样本的下一步预测对比")
@@ -105,8 +99,8 @@ def visualize_results(X_test, y_test, y_pred_next, long_term_preds, full_recon, 
     plt.legend()
 
     plt.tight_layout()
-    plt.savefig('multi_task_results.png')
-    print("多任务结果图已保存为 'multi_task_results.png'")
+    plt.savefig('multi_task_results_multi_channel.png')
+    print("多通道多任务结果图已保存为 'multi_task_results_multi_channel.png'")
 
 
 def main(run_ablation=False):
@@ -119,19 +113,29 @@ def main(run_ablation=False):
     df = handle_missing_values(df)
     train, test = split_sequential(df)
 
+    # 新增：数据标准化
+    train_norm, test_norm, train_mean, train_std = normalize_data(train, test)
+
+    # 保存标准化参数，用于后续结果反标准化
+    CONFIG['train_mean'] = train_mean
+    CONFIG['train_std'] = train_std
+
     # 2. 特征工程
     window_size = CONFIG['default_window']
-    predict_steps = 3  # 预测未来3步
+    predict_steps = 3
 
-    # 创建滑动窗口 - 返回形状为 [n_samples, window_size] 和 [n_samples, predict_steps]
-    X_train, y_train = create_sliding_windows(train['OT'].values, window_size, predict_steps)
-    X_test, y_test = create_sliding_windows(test['OT'].values, window_size, predict_steps)
+    # 使用修改后的create_sliding_windows，指定目标列为'OT'
+    X_train, y_train = create_sliding_windows(train_norm, window_size, predict_steps, target_col='OT')
+    X_test, y_test = create_sliding_windows(test_norm, window_size, predict_steps, target_col='OT')
+
+    print(f"输入数据形状: X_train={X_train.shape}, X_test={X_test.shape}")
+    print(f"输出数据形状: y_train={y_train.shape}, y_test={y_test.shape}")  # 现在应该是 (13902, 3)
 
     # 3. 模型训练
-    print("\n===== 训练多任务模型 =====")
+    print("\n===== 训练多任务模型 (多通道输入) =====")
     model = build_multi_task_model(
         window_size=window_size,
-        input_size=1,
+        input_size=train_norm.shape[1],  # 特征数量
         predict_steps=predict_steps,
         reconstruction_mode='full',
         device=device
@@ -165,45 +169,48 @@ def main(run_ablation=False):
     # 4.4 重构部分序列 (X_{n/2} 到 X_n)
     partial_recon = reconstruct_sequence(trained_model, X_test, mode='partial', device=device)
 
-    # 5. 评估
-    print("\n===== 评估结果 =====")
+    # 新增：反标准化结果
+    def denormalize_ot(values, mean, std):
+        """反标准化OT值"""
+        return values * std['OT'] + mean['OT']
 
-    # 普通预测评估 - 只比较下一步预测
-    mse_next = np.mean((y_test[:, 0] - y_pred_next) ** 2)
-    print(f"普通预测 (X_{{n+1}}) MSE: {mse_next:.4f}")  # 修复这里：使用双大括号转义
+    # 反标准化预测结果
+    y_test_denorm = denormalize_ot(y_test, train_mean, train_std)
+    y_pred_next_denorm = denormalize_ot(y_pred_next, train_mean, train_std)
+    long_term_preds_denorm = [denormalize_ot(preds, train_mean, train_std) for preds in long_term_preds]
 
-    # 长时延预测评估 - 比较所有预测步
-    long_term_preds_array = np.array(long_term_preds)  # 转换为数组 [n_samples, predict_steps]
-    mse_long_term = np.mean((y_test - long_term_preds_array) ** 2)
-    print(f"长时延预测 (平均MSE): {mse_long_term:.4f}")
+    # 5. 评估 (使用反标准化后的数据)
+    print("\n===== 评估结果 (反标准化后) =====")
 
-    # 分步评估长时延预测
-    for step in range(predict_steps):
-        step_mse = np.mean((y_test[:, step] - long_term_preds_array[:, step]) ** 2)
-        print(f"  步长 {step + 1} (X_{{n+{step + 1}}}) MSE: {step_mse:.4f}")  # 修复这里
+    # 普通预测评估
+    mse_next = np.mean((y_test_denorm[:, 0] - y_pred_next_denorm) ** 2)
+    print(f"您的模型单步预测 (X_{{n+1}}) MSE: {mse_next:.4f}")
 
-    # 重构评估
-    full_recon_error = np.mean((X_test - full_recon) ** 2)
-    print(f"完整窗口重构 MSE: {full_recon_error:.4f}")
+    # 长时延预测评估
+    long_term_preds_array = np.array(long_term_preds_denorm)
+    mse_long_term = np.mean((y_test_denorm - long_term_preds_array) ** 2)
+    print(f"您的模型长时延预测 (平均MSE): {mse_long_term:.4f}")
 
-    # 部分重构评估 (只评估后半部分)
-    half_len = window_size // 2
-    partial_recon_error = np.mean((X_test[:, half_len:] - partial_recon) ** 2)
-    print(f"部分序列重构 MSE: {partial_recon_error:.4f}")
     # 添加基线模型比较
     print("\n===== 基线模型比较 =====")
-    from persistence_baseline import PersistenceModel
 
-    # 初始化基线模型
-    baseline_model = PersistenceModel(predict_steps=predict_steps)
+    # 创建基线模型实例 - 指定目标列为'OT'
+    baseline_model = PersistenceModel(predict_steps=predict_steps, target_col='OT')
+
+    # 使用训练集确定目标列索引
+    baseline_model.fit(train_norm)
 
     # 基线模型预测
     baseline_next = baseline_model.predict_single_step(X_test)
     baseline_multi = baseline_model.predict_multi_step(X_test)
 
+    # 反标准化基线预测结果
+    baseline_next_denorm = denormalize_ot(baseline_next, train_mean, train_std)
+    baseline_multi_denorm = denormalize_ot(baseline_multi, train_mean, train_std)
+
     # 基线模型评估
-    baseline_mse_next = np.mean((y_test[:, 0] - baseline_next) ** 2)
-    baseline_mse_multi = np.mean((y_test - baseline_multi) ** 2)
+    baseline_mse_next = np.mean((y_test_denorm[:, 0] - baseline_next_denorm) ** 2)
+    baseline_mse_multi = np.mean((y_test_denorm - baseline_multi_denorm) ** 2)
 
     print(f"基线模型单步预测 MSE: {baseline_mse_next:.4f}")
     print(
@@ -215,9 +222,9 @@ def main(run_ablation=False):
 
     # 可视化比较
     plt.figure(figsize=(12, 6))
-    plt.plot(y_test[:100, 0], label='真实值')
-    plt.plot(y_pred_next[:100], label='您的模型')
-    plt.plot(baseline_next[:100], label='基线模型', alpha=0.7)
+    plt.plot(y_test_denorm[:100, 0], label='真实值')
+    plt.plot(y_pred_next_denorm[:100], label='您的模型')
+    plt.plot(baseline_next_denorm[:100], label='基线模型', alpha=0.7)
     plt.title("单步预测对比")
     plt.xlabel("样本索引")
     plt.ylabel("油温")
@@ -227,10 +234,10 @@ def main(run_ablation=False):
     # 6. 可视化结果
     print("\n===== 可视化结果 =====")
     visualize_results(
-        X_test,
-        y_test,
-        y_pred_next,
-        long_term_preds,
+        X_test,  # 注意：可视化时使用标准化数据
+        y_test_denorm,  # 但标签使用反标准化数据
+        y_pred_next_denorm,
+        long_term_preds_denorm,
         full_recon,
         partial_recon,
         window_size
