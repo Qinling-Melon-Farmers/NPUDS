@@ -190,6 +190,39 @@ def main(run_ablation=False):
     half_len = window_size // 2
     partial_recon_error = np.mean((X_test[:, half_len:] - partial_recon) ** 2)
     print(f"部分序列重构 MSE: {partial_recon_error:.4f}")
+    # 添加基线模型比较
+    print("\n===== 基线模型比较 =====")
+    from persistence_baseline import PersistenceModel
+
+    # 初始化基线模型
+    baseline_model = PersistenceModel(predict_steps=predict_steps)
+
+    # 基线模型预测
+    baseline_next = baseline_model.predict_single_step(X_test)
+    baseline_multi = baseline_model.predict_multi_step(X_test)
+
+    # 基线模型评估
+    baseline_mse_next = np.mean((y_test[:, 0] - baseline_next) ** 2)
+    baseline_mse_multi = np.mean((y_test - baseline_multi) ** 2)
+
+    print(f"基线模型单步预测 MSE: {baseline_mse_next:.4f}")
+    print(
+        f"您的模型单步预测 MSE: {mse_next:.4f} (改进: {(baseline_mse_next - mse_next) / baseline_mse_next * 100:.2f}%)")
+
+    print(f"基线模型多步预测 MSE: {baseline_mse_multi:.4f}")
+    print(
+        f"您的模型多步预测 MSE: {mse_long_term:.4f} (改进: {(baseline_mse_multi - mse_long_term) / baseline_mse_multi * 100:.2f}%)")
+
+    # 可视化比较
+    plt.figure(figsize=(12, 6))
+    plt.plot(y_test[:100, 0], label='真实值')
+    plt.plot(y_pred_next[:100], label='您的模型')
+    plt.plot(baseline_next[:100], label='基线模型', alpha=0.7)
+    plt.title("单步预测对比")
+    plt.xlabel("样本索引")
+    plt.ylabel("油温")
+    plt.legend()
+    plt.savefig('model_vs_baseline.png')
 
     # 6. 可视化结果
     print("\n===== 可视化结果 =====")
