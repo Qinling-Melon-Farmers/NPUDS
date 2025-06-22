@@ -5,85 +5,70 @@ from sklearn.metrics import mean_absolute_error, r2_score
 from torch.utils.data import DataLoader, TensorDataset
 
 
-class MultiTaskLSTMModel(nn.Module):
-    def __init__(self, input_size=8, hidden_size=64, output_size=1,  # 修改input_size为8
-                 predict_steps=1, reconstruction_mode='full'):
-        super(MultiTaskLSTMModel, self).__init__()
-        self.predict_steps = predict_steps
-        self.reconstruction_mode = reconstruction_mode
-        self.input_size = input_size  # 保存输入尺寸
+class SimplifiedPredictor(nn.Module):
+    """
+    简化的预测专用模型
+    专注于油温预测，不包含重构任务
+    """
 
-        # LSTM编码器 - 输入尺寸改为8
+    def __init__(self, input_size=7, hidden_size=128, output_size=1, predict_steps=1):
+        super().__init__()
+        self.input_size = input_size  # 确保这一行存在
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.predict_steps = predict_steps
+
+        # 增强的编码器
         self.encoder = nn.LSTM(
             input_size=input_size,
             hidden_size=hidden_size,
-            batch_first=True
+            num_layers=2,  # 增加层数
+            batch_first=True,
+            dropout=0.2
         )
 
-        # 预测任务解码器
+        # 预测解码器
         self.predict_decoder = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
+            nn.Linear(hidden_size, hidden_size * 2),
             nn.ReLU(),
-            nn.Linear(hidden_size, output_size * predict_steps),
-        )
-
-        # 重构任务解码器 - 输出尺寸改为8
-        self.recon_decoder = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, input_size),  # 输出所有特征
+            nn.Dropout(0.3),
+            nn.Linear(hidden_size * 2, output_size * predict_steps),
         )
 
     def forward(self, x):
-        # 编码器
         lstm_out, (hidden, cell) = self.encoder(x)
-
-        # 预测任务 - 只预测OT值
-        prediction = self.predict_decoder(hidden.squeeze(0))
-        prediction = prediction.view(-1, self.predict_steps)
-
-        # 重构任务 - 重构所有特征
-        if self.reconstruction_mode == 'full':
-            reconstruction = self.recon_decoder(lstm_out)
-        elif self.reconstruction_mode == 'partial':
-            seq_len = lstm_out.size(1)
-            half_len = seq_len // 2
-            recon_part = self.recon_decoder(lstm_out[:, half_len:, :])
-
-            full_recon = torch.zeros(
-                x.size(0), seq_len, self.input_size,
-                device=x.device, dtype=x.dtype
-            )
-            full_recon[:, half_len:] = recon_part
-            reconstruction = full_recon
-        else:
-            raise ValueError(f"未知重构模式: {self.reconstruction_mode}")
-
-        return prediction, reconstruction
+        prediction = self.predict_decoder(hidden[-1])  # 取最后一层的隐藏状态
+        return prediction.view(-1, self.predict_steps)
 
 
-def build_multi_task_model(window_size, input_size=8, predict_steps=1,  # 默认输入尺寸改为8
-                           reconstruction_mode='full', device='cpu'):
+def build_simplified_predictor(input_size=7, hidden_size=128, output_size=1, predict_steps=1, device='cpu'):
     """
-    构建多任务模型
+    构建简化版的预测专用模型
 
     参数:
-    window_size: 输入窗口大小
-    input_size: 输入特征维度 (现在为8)
-    predict_steps: 预测步数
-    reconstruction_mode: 重构模式
-    device: 计算设备
+    input_size: 输入特征维度 (默认为7)
+    hidden_size: LSTM隐藏层大小
+    output_size: 输出维度 (默认为1，即OT值)
+    predict_steps: 预测步数 (默认为1)
+    device: 计算设备 (默认为'cpu')
+
+    返回:
+    model: 构建好的 SimplifiedPredictor 模型
     """
-    model = MultiTaskLSTMModel(
+    model = SimplifiedPredictor(
         input_size=input_size,
-        predict_steps=predict_steps,
-        reconstruction_mode=reconstruction_mode
+        hidden_size=hidden_size,
+        output_size=output_size,
+        predict_steps=predict_steps
     )
     return model.to(device)
 
 
-def train_multi_task_model(model, X_train, y_train, epochs=50, batch_size=32, device='cpu'):
-    # 数据已经是3D: [samples, sequence_length, features]
+
+def train_predict_model(model, X_train, y_train, epochs=100, batch_size=32, device='cpu'):
+    """
+    训练预测专用模型
+    """
     # 转换为张量
     X_tensor = torch.tensor(X_train, dtype=torch.float32).to(device)
     y_tensor = torch.tensor(y_train, dtype=torch.float32).to(device)
@@ -93,16 +78,18 @@ def train_multi_task_model(model, X_train, y_train, epochs=50, batch_size=32, de
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     # 定义损失函数和优化器
-    criterion_pred = nn.MSELoss()  # 预测任务损失
-    criterion_recon = nn.MSELoss()  # 重构任务损失
+    criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=10, verbose=True
+    )
 
     # 训练循环
     model.train()
+    best_loss = float('inf')
+
     for epoch in range(epochs):
         total_loss = 0
-        total_pred_loss = 0
-        total_recon_loss = 0
         all_preds = []
         all_true = []
 
@@ -110,56 +97,43 @@ def train_multi_task_model(model, X_train, y_train, epochs=50, batch_size=32, de
             optimizer.zero_grad()
 
             # 前向传播
-            prediction, reconstruction = model(X_batch)
+            predictions = model(X_batch)
 
-            # 计算预测任务损失 - y_batch形状为 [batch_size, predict_steps]
-            pred_loss = criterion_pred(prediction, y_batch)  # 注意：prediction形状应为 [batch_size, predict_steps]
-
-            # 计算重构任务损失 - 现在重构所有特征
-            if model.reconstruction_mode == 'full':
-                recon_loss = criterion_recon(reconstruction, X_batch)
-            else:
-                seq_len = X_batch.size(1)
-                half_len = seq_len // 2
-                recon_loss = criterion_recon(
-                    reconstruction[:, half_len:],
-                    X_batch[:, half_len:]
-                )
-            # 组合损失 - 动态调整权重
-            # 前期侧重重构，后期侧重预测
-            if epoch < epochs // 2:
-                loss = 0.4 * pred_loss + 0.6 * recon_loss
-            else:
-                loss = 0.7 * pred_loss + 0.3 * recon_loss
+            # 计算损失
+            loss = criterion(predictions, y_batch)
 
             # 反向传播
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # 梯度裁剪
             optimizer.step()
 
-            # 记录损失
             total_loss += loss.item()
-            total_pred_loss += pred_loss.item()
-            total_recon_loss += recon_loss.item()
+            all_preds.extend(predictions[:, 0].detach().cpu().numpy())
+            all_true.extend(y_batch[:, 0].cpu().numpy())
 
-            # 收集预测结果用于指标计算
-            all_preds.extend(prediction[:, 0].cpu().detach().numpy())  # 只取第一步预测
-            all_true.extend(y_batch[:, 0].cpu().detach().numpy())
+        # 更新学习率
+        avg_loss = total_loss / len(loader)
+        scheduler.step(avg_loss)
 
         # 计算指标
         mae = mean_absolute_error(all_true, all_preds)
         r2 = r2_score(all_true, all_preds)
 
-        print(f'Epoch {epoch + 1}/{epochs}, Total Loss: {total_loss / len(loader):.4f}, '
-              f'Pred Loss: {total_pred_loss / len(loader):.4f}, '
-              f'Recon Loss: {total_recon_loss / len(loader):.4f}, '
-              f'MAE: {mae:.4f}, R²: {r2:.4f}')
+        print(f'Epoch {epoch + 1}/{epochs}, Loss: {avg_loss:.4f}, MAE: {mae:.4f}, R²: {r2:.4f}')
 
+        # 保存最佳模型
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            torch.save(model.state_dict(), 'best_predict_model.pth')
+
+    # 加载最佳模型
+    model.load_state_dict(torch.load('best_predict_model.pth'))
     return model
 
 
-def predict_next_step(model, X, device='device'):
+def predict_next_step(model, X, device='cpu'):
     """
-    普通预测 (X_{n+1})
+    普通预测 (X_{n+1}) - 简化模型版本
 
     参数:
     model: 训练好的模型
@@ -167,20 +141,24 @@ def predict_next_step(model, X, device='device'):
     device: 计算设备
 
     返回:
-    预测结果 [samples] (只预测下一步的OT值)
+    预测结果 [samples] (只预测下一步)
     """
     model.eval()
     with torch.no_grad():
         X_tensor = torch.tensor(X, dtype=torch.float32).to(device)
-        prediction, _ = model(X_tensor)
-        # 只取每个样本的第一步预测
-        next_step_pred = prediction[:, 0].cpu().numpy()
-    return next_step_pred
+        prediction = model(X_tensor)  # 简化模型直接返回预测值
+
+        # 确保预测形状正确
+        if prediction.dim() == 2:
+            # 预测形状应为 [samples, predict_steps]
+            return prediction[:, 0].cpu().numpy()
+        else:
+            raise ValueError(f"意外预测形状: {prediction.shape}")
 
 
-def predict_long_term(model, initial_seq, steps=3, device='device'):
+def predict_long_term(model, initial_seq, steps=3, device='cpu'):
     """
-    长时延预测 (X_{n+k})
+    长时延预测 (X_{n+k}) - 简化模型版本
 
     参数:
     model: 训练好的模型
@@ -202,11 +180,10 @@ def predict_long_term(model, initial_seq, steps=3, device='device'):
 
         for _ in range(steps):
             # 预测下一个点
-            prediction, _ = model(current_seq)
+            prediction = model(current_seq)  # 简化模型直接返回预测值
             next_val = prediction[0, 0].item()  # 取第一个样本的第一步预测
 
             # 创建新点 - 只有OT值，其他特征未知
-            # 这里简单假设其他特征不变，但实际应用中可能需要更好的处理
             new_point = np.zeros((1, 1, model.input_size))
             new_point[0, 0, -1] = next_val  # 假设OT是最后一个特征
 
@@ -219,36 +196,3 @@ def predict_long_term(model, initial_seq, steps=3, device='device'):
             predictions.append(next_val)
 
     return np.array(predictions)
-
-
-def reconstruct_sequence(model, X, mode='full', device='device'):
-    """
-    重构序列
-
-    参数:
-    model: 训练好的模型
-    X: 输入序列 [samples, window_size]
-    mode: 重构模式 ('full', 'partial')
-    device: 计算设备
-
-    返回:
-    重构序列 [samples, window_size] 或 [samples, window_size//2]
-    """
-    model.eval()
-    with torch.no_grad():
-        # 确保输入是3D
-        if len(X.shape) == 2:
-            X = X.reshape(X.shape[0], X.shape[1], 1)
-
-        X_tensor = torch.tensor(X, dtype=torch.float32).to(device)
-        _, reconstruction = model(X_tensor)
-
-        # 根据模式返回不同部分
-        if mode == 'full':
-            return reconstruction.cpu().numpy()
-        elif mode == 'partial':
-            seq_len = X.shape[1]
-            half_len = seq_len // 2
-            return reconstruction[:, half_len:].cpu().numpy()
-        else:
-            raise ValueError(f"未知重构模式: {mode}")

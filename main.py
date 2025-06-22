@@ -1,7 +1,7 @@
 # 在文件顶部设置后端
 import matplotlib
 
-from feature_engineering import create_sliding_windows
+from feature_engineering import create_sliding_windows, add_engineered_features
 from persistence_baseline import PersistenceModel
 
 matplotlib.use('Agg')  # 使用非交互式后端
@@ -21,11 +21,10 @@ import torch
 import numpy as np
 from data_preprocessing import load_data, handle_missing_values, split_sequential, normalize_data
 from model_building import (
-    build_multi_task_model,
-    train_multi_task_model,
+    build_simplified_predictor,
+    train_predict_model,
     predict_next_step,
-    predict_long_term,
-    reconstruct_sequence
+    predict_long_term, SimplifiedPredictor
 )
 from config import CONFIG
 
@@ -59,37 +58,8 @@ def visualize_results(X_test, y_test, y_pred_next, long_term_preds, full_recon, 
     plt.ylabel("油温")
     plt.legend()
 
-    # 3. 重构整个窗口 (OT特征)
-    plt.subplot(3, 2, 3)
-    # 只显示OT特征的重构
-    ot_idx = -1  # 假设OT是最后一个特征
-    plt.plot(X_test[sample_idx, :, ot_idx], label='原始OT序列')
-    plt.plot(full_recon[sample_idx, :, ot_idx], label='重构OT序列')
-    plt.title("整个窗口重构 (OT特征)")
-    plt.xlabel("时间步")
-    plt.ylabel("油温")
-    plt.legend()
 
-    # 4. 重构部分序列 (OT特征)
-    plt.subplot(3, 2, 4)
-    half_len = window_size // 2
-    plt.plot(range(window_size), X_test[sample_idx, :, ot_idx], label='原始OT序列')
-    plt.plot(range(half_len, window_size), partial_recon[sample_idx, :, ot_idx], label='重构部分OT序列')
-    plt.title("部分序列重构 (OT特征)")
-    plt.xlabel("时间步")
-    plt.ylabel("油温")
-    plt.legend()
-
-    # 5. 其他特征重构示例 (HUFL)
-    plt.subplot(3, 2, 5)
-    plt.plot(X_test[sample_idx, :, 1], label='原始HUFL序列')
-    plt.plot(full_recon[sample_idx, :, 1], label='重构HUFL序列')
-    plt.title("整个窗口重构 (HUFL特征)")
-    plt.xlabel("时间步")
-    plt.ylabel("HUFL值")
-    plt.legend()
-
-    # 6. 预测对比 (前100个样本的下一步预测)
+    # 3. 预测对比 (前100个样本的下一步预测)
     plt.subplot(3, 2, 6)
     plt.plot(y_test[:100, 0], label='真实值')
     plt.plot(y_pred_next[:100], label='预测值')
@@ -130,28 +100,40 @@ def main(run_ablation=False):
 
     print(f"输入数据形状: X_train={X_train.shape}, X_test={X_test.shape}")
     print(f"输出数据形状: y_train={y_train.shape}, y_test={y_test.shape}")  # 现在应该是 (13902, 3)
+    # 添加工程特征
+    train = add_engineered_features(train)
+    test = add_engineered_features(test)
 
-    # 3. 模型训练
-    print("\n===== 训练多任务模型 (多通道输入) =====")
-    model = build_multi_task_model(
-        window_size=window_size,
-        input_size=train_norm.shape[1],  # 特征数量
-        predict_steps=predict_steps,
-        reconstruction_mode='full',
-        device=device
-    )
+    # 重新标准化
+    train_norm, test_norm, train_mean, train_std = normalize_data(train, test)
 
-    trained_model = train_multi_task_model(
+    # 特征工程
+    X_train, y_train = create_sliding_windows(train_norm, window_size, predict_steps, target_col='OT')
+    X_test, y_test = create_sliding_windows(test_norm, window_size, predict_steps, target_col='OT')
+
+    print(f"输入数据形状: X_train={X_train.shape}, X_test={X_test.shape}")
+    print(f"输出数据形状: y_train={y_train.shape}, y_test={y_test.shape}")
+
+    # 3. 训练简化模型
+    print("\n===== 训练简化预测模型 =====")
+    model = SimplifiedPredictor(
+        input_size=X_train.shape[2],  # 特征数量
+        hidden_size=128,
+        output_size=1,
+        predict_steps=predict_steps
+    ).to(device)
+
+    trained_model = train_predict_model(
         model,
         X_train,
         y_train,
-        epochs=50,
-        batch_size=32,
+        epochs=100,  # 增加训练轮次
+        batch_size=64,
         device=device
     )
 
     # 4. 执行不同任务
-    print("\n===== 执行预测和重构任务 =====")
+    print("\n===== 执行预测任务 =====")
 
     # 4.1 普通预测 (X_{n+1})
     y_pred_next = predict_next_step(trained_model, X_test, device=device)
@@ -162,12 +144,6 @@ def main(run_ablation=False):
         initial_seq = X_test[i:i + 1]  # 取一个样本
         preds = predict_long_term(trained_model, initial_seq, steps=predict_steps, device=device)
         long_term_preds.append(preds)
-
-    # 4.3 重构整个窗口 (X_n)
-    full_recon = reconstruct_sequence(trained_model, X_test, mode='full', device=device)
-
-    # 4.4 重构部分序列 (X_{n/2} 到 X_n)
-    partial_recon = reconstruct_sequence(trained_model, X_test, mode='partial', device=device)
 
     # 新增：反标准化结果
     def denormalize_ot(values, mean, std):
@@ -238,8 +214,6 @@ def main(run_ablation=False):
         y_test_denorm,  # 但标签使用反标准化数据
         y_pred_next_denorm,
         long_term_preds_denorm,
-        full_recon,
-        partial_recon,
         window_size
     )
 
