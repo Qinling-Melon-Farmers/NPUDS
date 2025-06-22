@@ -83,7 +83,7 @@ class MultiTaskLSTMModel(nn.Module):
 
 
 def build_multi_task_model(window_size, input_size=1, predict_steps=1,
-                           reconstruction_mode='full', device='cpu'):
+                           reconstruction_mode='full', device='device'):
     """
     构建多任务模型
 
@@ -102,7 +102,7 @@ def build_multi_task_model(window_size, input_size=1, predict_steps=1,
     return model.to(device)
 
 
-def train_multi_task_model(model, X_train, y_train, epochs=50, batch_size=32, device='cpu'):
+def train_multi_task_model(model, X_train, y_train, epochs=50, batch_size=32, device='device'):
     """
     训练多任务模型
 
@@ -196,7 +196,7 @@ def train_multi_task_model(model, X_train, y_train, epochs=50, batch_size=32, de
     return model
 
 
-def predict_next_step(model, X, device='cpu'):
+def predict_next_step(model, X, device='device'):
     """
     普通预测 (X_{n+1})
 
@@ -221,7 +221,7 @@ def predict_next_step(model, X, device='cpu'):
     return next_step_pred
 
 
-def predict_long_term(model, initial_seq, steps=3, device='cpu'):
+def predict_long_term(model, initial_seq, steps=3, device='device'):
     """
     长时延预测 (X_{n+k})
 
@@ -258,7 +258,7 @@ def predict_long_term(model, initial_seq, steps=3, device='cpu'):
     return np.array(predictions)
 
 
-def reconstruct_sequence(model, X, mode='full', device='cpu'):
+def reconstruct_sequence(model, X, mode='full', device='device'):
     """
     重构序列
 

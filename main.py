@@ -109,7 +109,7 @@ def visualize_results(X_test, y_test, y_pred_next, long_term_preds, full_recon, 
     print("多任务结果图已保存为 'multi_task_results.png'")
 
 
-def main():
+def main(run_ablation=False):
     # 设置设备
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"使用设备: {device}")
@@ -203,6 +203,46 @@ def main():
         window_size
     )
 
+    # 7. 运行消融实验
+    if run_ablation:
+        print("\n===== 开始窗口大小消融实验 =====")
+        from ablation_study import window_size_ablation, visualize_ablation_results
+
+        # 运行消融实验
+        ablation_results = window_size_ablation(
+            train['OT'],
+            test['OT'],
+            sizes=[8, 16, 32, 64, 128],  # 测试的窗口大小
+            predict_steps=predict_steps,
+            device=device
+        )
+
+        # 可视化消融实验结果
+        visualize_ablation_results(ablation_results)
+
+        # 找到最佳窗口大小
+        best_idx = ablation_results['overall_score'].idxmax()
+        best_ws = ablation_results.loc[best_idx, 'window_size']
+        print(f"\n最佳窗口大小: {best_ws} (综合评分: {ablation_results.loc[best_idx, 'overall_score']:.4f})")
+
+        # 保存结果
+        ablation_results.to_csv('window_size_ablation_results.csv', index=False)
+        print("消融实验结果已保存为 'window_size_ablation_results.csv'")
+
+        # 更新配置中的默认窗口大小
+        CONFIG['default_window'] = best_ws
+        print(f"已更新默认窗口大小为: {best_ws}")
+
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    # 创建命令行参数解析器
+    parser = argparse.ArgumentParser(description='多任务时间序列模型')
+    parser.add_argument('--ablation', action='store_true',
+                        help='运行窗口大小消融实验')
+
+    args = parser.parse_args()
+
+    # 运行主函数，根据参数决定是否运行消融实验
+    main(run_ablation=args.ablation)
