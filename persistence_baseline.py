@@ -3,6 +3,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
+from utils import mean_absolute_percentage_error
+
 
 class PersistenceModel:
     """
@@ -146,9 +148,11 @@ def baseline_experiment(train_data, test_data, window_size, predict_steps=3, tar
         'next_step_mse': mean_squared_error(y_test[:, 0], y_pred_next),
         'next_step_mae': mean_absolute_error(y_test[:, 0], y_pred_next),
         'next_step_r2': r2_score(y_test[:, 0], y_pred_next),
+        'next_step_mape': mean_absolute_percentage_error(y_test[:, 0], y_pred_next),
         'multi_step_mse': mean_squared_error(y_test, y_pred_multi),
         'multi_step_mae': mean_absolute_error(y_test, y_pred_multi),
-        'multi_step_r2': r2_score(y_test, y_pred_multi)
+        'multi_step_r2': r2_score(y_test, y_pred_multi),
+        'multi_step_mape': mean_absolute_percentage_error(y_test.flatten(), y_pred_multi.flatten())
     }
 
     # 可视化
@@ -194,6 +198,13 @@ def baseline_experiment(train_data, test_data, window_size, predict_steps=3, tar
     plt.tight_layout()
     plt.savefig('baseline_results.png')
 
+    plt.suptitle(
+        f"基线模型性能 (单步MAPE: {metrics['next_step_mape']:.2f}%, 多步MAPE: {metrics['multi_step_mape']:.2f}%)",
+        fontsize=14)
+
+    plt.tight_layout()
+    plt.savefig('baseline_results_mape.png')
+
     return {
         'metrics': metrics,
         'y_true': y_test,
@@ -229,8 +240,10 @@ if __name__ == "__main__":
     print(f"单步预测 MSE: {metrics['next_step_mse']:.4f}")
     print(f"单步预测 MAE: {metrics['next_step_mae']:.4f}")
     print(f"单步预测 R²: {metrics['next_step_r2']:.4f}")
+    print(f"单步预测 MAPE: {metrics['next_step_mape']:.4f}")
     print(f"多步预测 MSE: {metrics['multi_step_mse']:.4f}")
     print(f"多步预测 MAE: {metrics['multi_step_mae']:.4f}")
     print(f"多步预测 R²: {metrics['multi_step_r2']:.4f}")
+    print(f"多步预测 MAPE: {metrics['multi_step_mape']:.4f}")
 
     print("\n可视化结果已保存为 'baseline_results.png'")
