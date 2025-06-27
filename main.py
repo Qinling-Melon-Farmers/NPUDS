@@ -53,6 +53,9 @@ def main():
     # 5. 评估
     mse = np.mean((y_test - y_pred) ** 2)
     print(f"测试集MSE: {mse:.4f}")
+    print(f"测试集RMSE: {np.sqrt(mse):.4f}")
+    print(f"测试集R^2: {1 - mse / np.var(y_test):.4f}")
+    print(f"测试集MAE: {np.mean(np.abs(y_test - y_pred)):.4f}")
 
     # 6.消融实验
     print("\n===== 消融实验 =====")

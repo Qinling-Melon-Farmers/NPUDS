@@ -1,5 +1,5 @@
 CONFIG = {
-    "data_path": "./ETTdata/ETTh1.csv",
+    "data_path": "./ETTdata/ETTm1.csv",
     "window_sizes": [8, 16, 32, 64, 128],
     "default_window": 32,
     "anomaly_types": ['peak', 'uniform'],

@@ -5,6 +5,8 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 from utils import mean_absolute_percentage_error
 
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 指定默认字体
+plt.rcParams['axes.unicode_minus'] = False    # 解决负号 '-' 显示为方块的问题
 
 class PersistenceModel:
     """
@@ -219,6 +221,9 @@ if __name__ == "__main__":
     np.random.seed(42)
     time = np.arange(0, 1000, 0.1)
     data = np.sin(time) + np.random.normal(0, 0.1, len(time))
+
+    # 将一维数据转换为二维数组 (n_samples, n_features=1)
+    data = data.reshape(-1, 1)
 
     # 分割数据
     split_idx = int(len(data) * 0.8)

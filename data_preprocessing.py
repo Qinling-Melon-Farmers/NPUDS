@@ -1,7 +1,7 @@
 import pandas as pd
 
 def load_data(data_path):
-    df = pd.read_csv('./ETTdata/ETTh1.csv')
+    df = pd.read_csv('./ETTdata/ETTm1.csv')
     df['date'] = pd.to_datetime(df['date'])
     df.set_index('date', inplace=True)
     return df[['OT']]  # 仅使用OT列
